@@ -1,0 +1,13 @@
+templates:
+  - templateId: legacy-ni-default
+    name: Legacy NI 8-line mapping
+    bindings:
+      V1: { device: Dev1, moduleType: DO, channel: 0, direction: OUT, invert: false }
+      V2: { device: Dev1, moduleType: DO, channel: 1, direction: OUT, invert: false }
+      V3: { device: Dev1, moduleType: DO, channel: 2, direction: OUT, invert: false }
+      COMPRESSOR: { device: Dev1, moduleType: DO, channel: 3, direction: OUT, invert: false }
+      P_SENSOR: { device: Dev1, moduleType: AI, channel: 0, direction: IN, invert: false }
+      COUNTER_PWR: { device: Dev1, moduleType: DO, channel: 5, direction: OUT, invert: false }
+      COUNTER_SIG: { device: Dev1, moduleType: DO, channel: 6, direction: OUT, invert: false }
+      BUZZER: { device: Dev1, moduleType: DO, channel: 7, direction: OUT, invert: false }
+

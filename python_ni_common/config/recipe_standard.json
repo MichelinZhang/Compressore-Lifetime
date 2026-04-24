@@ -1,0 +1,57 @@
+[
+    {
+        "name": "Phase 1: Initial Pressurization",
+        "loop_count": 4,
+        "steps": [
+            {"type": "LOG", "msg": "Phase 1 Start: Pressurizing"},
+            {"type": "SET_DO", "target": "Valve_V1", "value": true},
+            {"type": "SET_DO", "target": "Compressor", "value": true},
+            {"type": "WAIT_ANALOG", "target": "Sys_Pressure", "condition": ">=", "value": 2.02, "timeout": 90.0},
+            
+            {"type": "LOG", "msg": "Target Reached, Releasing"},
+            {"type": "SET_DO", "target": "Compressor", "value": true},
+            {"type": "SET_DO", "target": "Valve_V1", "value": false},
+            {"type": "SET_DO", "target": "Valve_V2", "value": true},
+            {"type": "SET_DO", "target": "Valve_V3", "value": true},
+            
+            {"type": "WAIT_ANALOG", "target": "Sys_Pressure", "condition": "<=", "value": 0.02, "timeout": 90.0},
+            {"type": "LOG", "msg": "Release Complete, executing hold"}
+        ]
+    },
+    {
+        "name": "Phase 2: Pulse Test",
+        "loop_count": 14,
+        "steps": [
+            {
+                "type": "LOOP_NESTED", 
+                "count": 10,
+                "steps": [
+                    {"type": "LOG", "msg": "Pulse Start"},
+                    {"type": "SET_DO", "target": "Valve_V1", "value": true},
+                    {"type": "SET_DO", "target": "Compressor", "value": true},
+                    {"type": "WAIT_TIME", "value": 1.0},
+                    {"type": "SET_DO", "target": "Compressor", "value": false},
+                    {"type": "WAIT_TIME", "value": 1.0}
+                ]
+            },
+            {"type": "LOG", "msg": "Phase 2 Cycle Release (V2+V3)"},
+            {"type": "SET_DO", "target": "Valve_V2", "value": true},
+            {"type": "SET_DO", "target": "Valve_V3", "value": true},
+            {"type": "WAIT_TIME", "value": 20.0},
+            
+            {"type": "LOG", "msg": "Phase 2 Cycle Release (V1)"},
+            {"type": "SET_DO", "target": "Valve_V1", "value": true},
+            {"type": "WAIT_TIME", "value": 37.0}
+        ]
+    },
+    {
+        "name": "Counter Trigger",
+        "loop_count": 1,
+        "steps": [
+            {"type": "LOG", "msg": "Triggering Physical Counter"},
+            {"type": "SET_DO", "target": "Counter_Signal", "value": true},
+            {"type": "WAIT_TIME", "value": 0.5},
+            {"type": "SET_DO", "target": "Counter_Signal", "value": false}
+        ]
+    }
+]

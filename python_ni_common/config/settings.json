@@ -1,0 +1,5 @@
+{
+    "simulation_mode": true,
+    "log_dir": "./logs",
+    "cycle_target": 350
+}

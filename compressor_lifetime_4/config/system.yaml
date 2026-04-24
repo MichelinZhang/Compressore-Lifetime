@@ -1,0 +1,7 @@
+simulation: true
+log_dir: data
+driver: ni
+api_host: 127.0.0.1
+api_port: 8000
+cors_origins:
+  - '*'

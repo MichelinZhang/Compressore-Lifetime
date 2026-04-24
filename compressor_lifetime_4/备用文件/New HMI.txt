@@ -1,0 +1,479 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { Play, Square, Pause, Plus, Settings, Terminal, X, Activity, Cpu, GripHorizontal, Sliders } from 'lucide-react';
+
+// --- 全局自定义动画样式 ---
+const customStyles = `
+  @keyframes cardEnter {
+    0% { opacity: 0; transform: scale(0.9) translateY(20px); }
+    100% { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  @keyframes cardExit {
+    0% { opacity: 1; transform: scale(1); }
+    100% { opacity: 0; transform: scale(0.9) translateY(-20px); }
+  }
+  .animate-card-enter { animation: cardEnter 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  .animate-card-exit { animation: cardExit 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; pointer-events: none; }
+  
+  .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+`;
+
+// --- 模拟后端数据流 ---
+const useSimulatedHardware = (isRunning, isPaused, targetP, floorP) => {
+  const [pressure, setPressure] = useState(0);
+  const [cycle, setCycle] = useState(0);
+  const [history, setHistory] = useState(Array(40).fill(0));
+
+  useEffect(() => {
+    if (!isRunning || isPaused) return;
+    let p = pressure;
+    let mode = 'up';
+    const interval = setInterval(() => {
+      if (mode === 'up') {
+        p += Math.random() * 0.15 + 0.05;
+        if (p >= targetP) mode = 'down';
+      } else {
+        p -= Math.random() * 0.2 + 0.1;
+        if (p <= floorP) {
+          mode = 'up';
+          setCycle(c => c + 1);
+        }
+      }
+      p = Math.max(0, p);
+      setPressure(p);
+      setHistory(prev => {
+        const next = [...prev, p];
+        if (next.length > 40) next.shift();
+        return next;
+      });
+    }, 100);
+    return () => clearInterval(interval);
+  }, [isRunning, isPaused, targetP, floorP, pressure]);
+
+  return { pressure, cycle, history };
+};
+
+// --- 增强版动态波形图 (心电图风格) ---
+const SparkLine = ({ data, colorHex }) => {
+  const max = Math.max(3.0, ...data); 
+  const min = 0;
+  
+  // 计算所有点的坐标
+  const points = data.map((val, i) => {
+    const x = (i / (data.length - 1)) * 100;
+    const y = 100 - ((val - min) / (max - min)) * 100;
+    return { x, y };
+  });
+
+  const polylineStr = points.map(p => `${p.x},${p.y}`).join(' ');
+  const lastPoint = points[points.length - 1] || { x: 100, y: 100 };
+
+  return (
+    <div className="w-full h-24 relative mt-[-10px] mb-6">
+      {/* 工业风背景参考网格 */}
+      <div 
+        className="absolute inset-0 border-b border-white/10" 
+        style={{ 
+          background: 'linear-gradient(90deg, transparent 95%, rgba(255,255,255,0.05) 100%)', 
+          backgroundSize: '10% 100%' 
+        }}
+      />
+      
+      {/* 扫频光带 (模拟心电图刷新效果) */}
+      <div className="absolute top-0 bottom-0 right-0 w-1/4 bg-gradient-to-r from-transparent to-black/40 z-20 pointer-events-none" />
+
+      <svg className="w-full h-full overflow-visible relative z-10" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {/* 1. 底部面积强渐变填充 */}
+        <polygon 
+          points={`0,100 ${polylineStr} 100,100`} 
+          fill={`url(#gradient-${colorHex})`} 
+          opacity="0.6" 
+        />
+        
+        {/* 2. 主曲线 (加粗并自带发光滤镜) */}
+        <polyline 
+          points={polylineStr} 
+          fill="none" 
+          stroke={colorHex} 
+          strokeWidth="3" 
+          strokeLinecap="round" 
+          strokeLinejoin="round" 
+          style={{ filter: `drop-shadow(0 0 6px ${colorHex})` }} 
+        />
+        
+        {/* 3. 前导发光追踪点 (高亮当前值) */}
+        <circle 
+          cx={lastPoint.x} 
+          cy={lastPoint.y} 
+          r="3" 
+          fill="#FFFFFF" 
+          stroke={colorHex} 
+          strokeWidth="1.5"
+          style={{ filter: `drop-shadow(0 0 8px ${colorHex})` }}
+        />
+        
+        {/* 4. 最新值的水平参考虚线 */}
+        <line 
+          x1="0" y1={lastPoint.y} 
+          x2={lastPoint.x} y2={lastPoint.y} 
+          stroke={colorHex} 
+          strokeWidth="0.5" 
+          strokeDasharray="2,2" 
+          opacity="0.5" 
+        />
+
+        <defs>
+          <linearGradient id={`gradient-${colorHex}`} x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor={colorHex} stopOpacity="0.9"/>
+            <stop offset="100%" stopColor={colorHex} stopOpacity="0"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
+  );
+};
+
+// --- 动态发光压力环 ---
+const GlowingPressureRing = ({ pressure, maxP, colorTheme }) => {
+  const radius = 50; // 稍微缩小给图表留空间
+  const circumference = 2 * Math.PI * radius;
+  const fillPercentage = Math.min((pressure / maxP) * 100, 100);
+  const strokeDashoffset = circumference - (fillPercentage / 100) * circumference;
+
+  return (
+    <div className="relative flex items-center justify-center w-40 h-40 mx-auto my-4 z-10 pointer-events-none">
+      <div className={`absolute inset-0 blur-3xl opacity-40 rounded-full transition-colors duration-700 ${colorTheme.glow}`}></div>
+      <svg className="absolute inset-0 w-full h-full -rotate-90 drop-shadow-2xl" viewBox="0 0 160 160">
+        <circle cx="80" cy="80" r={radius} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="10" />
+        <circle 
+          cx="80" cy="80" r={radius} fill="none" stroke="currentColor" strokeWidth="10" strokeLinecap="round"
+          strokeDasharray={circumference} strokeDashoffset={strokeDashoffset}
+          className={`transition-all duration-300 ${colorTheme.text}`}
+          style={{ filter: `drop-shadow(0 0 8px ${colorTheme.hex})` }}
+        />
+      </svg>
+      <div className="relative z-10 flex flex-col items-center justify-center">
+        <span className="text-3xl font-black text-white tracking-tighter" style={{ textShadow: '0 2px 10px rgba(0,0,0,0.5)' }}>
+          {pressure.toFixed(2)}
+        </span>
+        <span className="text-[10px] text-white/50 font-bold tracking-widest mt-1">BAR</span>
+      </div>
+    </div>
+  );
+};
+
+// --- 磨砂玻璃参数面板 ---
+const GlassPanel = ({ label, value, unit, isWarning }) => (
+  <div className="flex flex-col items-center justify-center p-3 bg-white/[0.03] border border-white/10 rounded-2xl backdrop-blur-md">
+    <span className="text-[9px] text-white/40 font-semibold tracking-wider mb-1 uppercase">{label}</span>
+    <div className="flex items-baseline gap-1">
+      <span className={`text-base font-bold ${isWarning ? 'text-red-400' : 'text-white/90'}`}>{value}</span>
+      {unit && <span className="text-[10px] text-white/30">{unit}</span>}
+    </div>
+  </div>
+);
+
+// --- 调试模式弹窗组件 (Debug Modal) ---
+const IO_MAP = [
+  "V1 阀门", "V2 阀门", "V3 阀门", "压缩机",
+  "压力计供电", "计数供电", "计数信号", "蜂鸣器/报警"
+];
+
+const DebugModal = ({ onClose, stationId, pressure, setStatus, onLog }) => {
+  const [ioStates, setIoStates] = useState(Array(8).fill(false));
+  const [rawPressure, setRawPressure] = useState(0);
+
+  useEffect(() => {
+    // 模拟带有噪声的原始采样值
+    const interval = setInterval(() => {
+      setRawPressure(Math.max(0, pressure + (Math.random() * 0.1 - 0.05)));
+    }, 100);
+    return () => clearInterval(interval);
+  }, [pressure]);
+
+  const toggleIO = (idx) => {
+    const newStates = [...ioStates];
+    newStates[idx] = !newStates[idx];
+    setIoStates(newStates);
+    onLog(`[Station ${stationId}] 手动切换 ${IO_MAP[idx]}: ${newStates[idx] ? 'ON' : 'OFF'}`);
+  };
+
+  const forceStatus = (newStatus, label) => {
+    setStatus(newStatus);
+    onLog(`[Station ${stationId}] 手动强制状态: ${label}`);
+    if (newStatus === 'error') {
+      const newStates = [...ioStates];
+      newStates[7] = true; // 触发蜂鸣器
+      setIoStates(newStates);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="relative w-full max-w-md max-h-[90vh] overflow-y-auto custom-scrollbar bg-[#111318] border border-white/10 rounded-3xl p-6 shadow-2xl flex flex-col gap-6" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="flex justify-between items-center">
+          <h2 className="text-lg font-bold text-white">Station {String(stationId).padStart(2, '0')} - 调试模式</h2>
+          <button onClick={onClose} className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-white/80 hover:text-white border border-white/5 transition-colors cursor-pointer">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* 压力显示区 */}
+        <div className="flex flex-col gap-2 p-4 bg-white/5 rounded-2xl border border-white/5">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-white/60">算法滤波值:</span>
+            <span className="text-2xl font-black text-blue-400">{pressure.toFixed(2)} Bar</span>
+          </div>
+          <div className="flex justify-between items-center">
+            <span className="text-xs text-white/40">原始瞬时值 (Raw):</span>
+            <span className="text-sm font-mono text-rose-400">{rawPressure.toFixed(2)} Bar</span>
+          </div>
+        </div>
+
+        {/* IO 控制网格 */}
+        <div className="grid grid-cols-2 gap-3">
+          {IO_MAP.map((name, idx) => (
+            <button
+              key={idx}
+              onClick={() => toggleIO(idx)}
+              className={`py-3 px-4 rounded-xl text-sm font-bold transition-all border cursor-pointer ${
+                ioStates[idx] 
+                  ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-400 shadow-[0_0_15px_rgba(52,211,106,0.1)]' 
+                  : 'bg-white/5 border-white/5 text-white/40 hover:bg-white/10'
+              }`}
+            >
+              <div className="text-xs font-normal mb-1 opacity-60">Line {idx}</div>
+              {name} {ioStates[idx] ? 'ON' : 'OFF'}
+            </button>
+          ))}
+        </div>
+
+        {/* 状态强制触发 */}
+        <div className="flex gap-2 pt-4 border-t border-white/10">
+          <button onClick={() => forceStatus('running', '运行')} className="flex-1 py-2 bg-emerald-500/20 text-emerald-400 rounded-lg text-xs font-bold hover:bg-emerald-500/30 transition-colors cursor-pointer">强制运行</button>
+          <button onClick={() => forceStatus('error', '报警')} className="flex-1 py-2 bg-rose-500/20 text-rose-400 rounded-lg text-xs font-bold hover:bg-rose-500/30 transition-colors cursor-pointer">触发报警</button>
+          <button onClick={() => forceStatus('paused', '暂停')} className="flex-1 py-2 bg-orange-500/20 text-orange-400 rounded-lg text-xs font-bold hover:bg-orange-500/30 transition-colors cursor-pointer">强制暂停</button>
+          <button onClick={() => forceStatus('idle', '待机')} className="flex-1 py-2 bg-white/10 text-white/60 rounded-lg text-xs font-bold hover:bg-white/20 transition-colors cursor-pointer">重置待机</button>
+        </div>
+
+        {/* 显著的返回按钮 */}
+        <button onClick={onClose} className="w-full mt-2 py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white/80 hover:text-white rounded-xl text-sm font-bold transition-all cursor-pointer shadow-lg active:scale-[0.98]">
+          返回主界面 (Close)
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// --- 高端卡片组件 (支持拖拽与动画) ---
+const StationCard = ({ station, onRemove, onLog, index, dragStart, dragEnter, drop }) => {
+  const [status, setStatus] = useState('idle');
+  const [params, setParams] = useState({ cycles: 350, targetP: 2.02, floorP: 0.02, maxP: 2.50 });
+  const [isDebugOpen, setIsDebugOpen] = useState(false);
+  
+  const isRunning = status === 'running';
+  const isPaused = status === 'paused';
+  const { pressure, cycle, history } = useSimulatedHardware(isRunning, isPaused, params.targetP, params.floorP);
+
+  useEffect(() => {
+    if (pressure > params.maxP && status !== 'error') {
+      setStatus('error');
+      onLog(`[Station ${station.id}] 故障: 压力超限`);
+    }
+  }, [pressure, params.maxP, status]);
+
+  const themes = {
+    idle: { bg: 'bg-[#1a1c23]', glow: 'bg-slate-500', text: 'text-slate-400', hex: '#94a3b8', border: 'border-white/5' },
+    running: { bg: 'bg-[#0f2118]', glow: 'bg-emerald-500', text: 'text-emerald-400', hex: '#34d399', border: 'border-emerald-500/20' },
+    paused: { bg: 'bg-[#2a1c0d]', glow: 'bg-orange-500', text: 'text-orange-400', hex: '#fb923c', border: 'border-orange-500/20' },
+    error: { bg: 'bg-[#2a0d12]', glow: 'bg-rose-600', text: 'text-rose-500', hex: '#f43f5e', border: 'border-rose-500/30' }
+  };
+  const theme = themes[status];
+
+  const handleToggle = () => {
+    if (status === 'idle') { setStatus('running'); onLog(`[Station ${station.id}] 启动`); }
+    else if (status === 'running') { setStatus('paused'); onLog(`[Station ${station.id}] 暂停`); }
+    else if (status === 'paused') { setStatus('running'); onLog(`[Station ${station.id}] 恢复`); }
+  };
+  const handleStop = () => { setStatus('idle'); onLog(`[Station ${station.id}] 停止`); };
+
+  return (
+    <div 
+      draggable
+      onDragStart={(e) => dragStart(e, index)}
+      onDragEnter={(e) => dragEnter(e, index)}
+      onDragEnd={drop}
+      onDragOver={(e) => e.preventDefault()}
+      className={`relative flex flex-col p-6 rounded-[32px] overflow-hidden transition-colors duration-700 ${theme.bg} ${theme.border} border shadow-2xl cursor-grab active:cursor-grabbing hover:border-white/20
+        ${station.isRemoving ? 'animate-card-exit' : 'animate-card-enter'}`}
+    >
+      <div className={`absolute -top-32 -left-32 w-96 h-96 rounded-full blur-[100px] opacity-20 transition-colors duration-700 ${theme.glow} pointer-events-none`}></div>
+
+      {/* 头部信息 */}
+      <div className="relative z-10 flex justify-between items-center cursor-grab">
+        <div className="flex items-center gap-3">
+          <div className={`p-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-md ${theme.text}`}>
+            {status === 'running' ? <Cpu className="w-5 h-5 animate-pulse" /> : <Activity className="w-5 h-5" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-white font-bold tracking-wide">Station {String(station.id).padStart(2, '0')}</h3>
+              <GripHorizontal className="w-4 h-4 text-white/20" /> {/* 拖拽暗示图标 */}
+            </div>
+            <p className={`text-xs uppercase font-bold tracking-widest mt-0.5 ${theme.text}`}>{status}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 z-20" onMouseDown={(e) => e.stopPropagation()}>
+          <button onClick={() => setIsDebugOpen(true)} className="w-8 h-8 flex items-center justify-center rounded-full bg-white/5 hover:bg-blue-500/20 hover:text-blue-400 text-white/30 transition-all backdrop-blur-md cursor-pointer">
+            <Sliders className="w-4 h-4" />
+          </button>
+          <button onClick={() => onRemove(station.id)} disabled={isRunning} className="w-8 h-8 flex items-center justify-center rounded-full bg-white/5 hover:bg-red-500/20 hover:text-red-400 text-white/30 transition-all disabled:opacity-0 backdrop-blur-md cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      <GlowingPressureRing pressure={pressure} maxP={params.maxP} colorTheme={theme} />
+      
+      {/* 压力曲线图表 */}
+      <SparkLine data={history} colorHex={theme.hex} />
+
+      <div className="relative z-10 grid grid-cols-4 gap-2 mb-6">
+        <GlassPanel label="Cycle" value={cycle} unit={`/ ${params.cycles}`} />
+        <GlassPanel label="Target" value={params.targetP.toFixed(2)} unit="B" />
+        <GlassPanel label="Floor" value={params.floorP.toFixed(2)} unit="B" />
+        <GlassPanel label="Max" value={params.maxP.toFixed(2)} unit="B" isWarning={pressure > params.maxP * 0.9} />
+      </div>
+
+      <div className="relative z-10 mt-auto flex gap-3 p-1.5 bg-black/40 border border-white/10 rounded-full backdrop-blur-xl" onMouseDown={(e) => e.stopPropagation()}>
+        <button onClick={handleToggle} disabled={status === 'error'} className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-full font-bold text-sm transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer ${status === 'running' ? 'bg-white/10 text-white hover:bg-white/20' : status === 'idle' ? 'bg-white text-black hover:bg-gray-200 shadow-[0_0_20px_rgba(255,255,255,0.3)]' : 'bg-orange-500 text-white hover:bg-orange-400 shadow-[0_0_20px_rgba(244,146,54,0.3)]'}`}>
+          {status === 'running' ? <Pause className="w-4 h-4" fill="currentColor" /> : <Play className="w-4 h-4" fill="currentColor" />}
+          {status === 'running' ? '暂停' : status === 'paused' ? '恢复' : '开始测试'}
+        </button>
+        <button onClick={handleStop} disabled={status === 'idle'} className="w-14 flex items-center justify-center rounded-full bg-white/5 hover:bg-rose-500 hover:text-white text-white/50 transition-all disabled:opacity-20 cursor-pointer">
+          <Square className="w-4 h-4" fill="currentColor" />
+        </button>
+      </div>
+
+      {isDebugOpen && typeof document !== 'undefined' && createPortal(
+        <DebugModal 
+          onClose={() => setIsDebugOpen(false)} 
+          stationId={station.id} 
+          pressure={pressure} 
+          setStatus={setStatus}
+          onLog={onLog} 
+        />,
+        document.body
+      )}
+    </div>
+  );
+};
+
+// --- 主应用 ---
+export default function App() {
+  const [stations, setStations] = useState([{ id: 1, isRemoving: false }, { id: 2, isRemoving: false }]);
+  const [logs, setLogs] = useState([`[SYSTEM] UI Rendered at ${new Date().toLocaleTimeString()}`]);
+  const logEndRef = useRef(null);
+  
+  // DnD 引用
+  const dragItem = useRef();
+  const dragOverItem = useRef();
+
+  const addLog = (msg) => setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`].slice(-30));
+  useEffect(() => logEndRef.current?.scrollIntoView({ behavior: 'smooth' }), [logs]);
+
+  // 新增动画处理
+  const addStation = () => {
+    const nextId = stations.length > 0 ? Math.max(...stations.map(s => s.id)) + 1 : 1;
+    setStations([...stations, { id: nextId, isRemoving: false }]);
+    addLog(`系统: 新增台架 0${nextId}`);
+  };
+
+  // 卸载动画处理 (延迟移除)
+  const removeStation = (id) => {
+    setStations(current => current.map(s => s.id === id ? { ...s, isRemoving: true } : s));
+    addLog(`系统: 准备移除台架 0${id}`);
+    setTimeout(() => {
+      setStations(current => current.filter(s => s.id !== id));
+      addLog(`系统: 已彻底移除台架 0${id}`);
+    }, 400); // 匹配 CSS 动画时间
+  };
+
+  // 拖拽处理函数
+  const dragStart = (e, position) => {
+    dragItem.current = position;
+    // 使用一个小小的延时让原生拖拽阴影生成后再隐藏被拖拽元素本身(可选)
+    setTimeout(() => e.target.classList.add('opacity-50'), 0);
+  };
+  const dragEnter = (e, position) => {
+    dragOverItem.current = position;
+    // 实时重新排序实现丝滑预览
+    if (dragItem.current !== position) {
+      const copyListItems = [...stations];
+      const dragItemContent = copyListItems[dragItem.current];
+      copyListItems.splice(dragItem.current, 1);
+      copyListItems.splice(position, 0, dragItemContent);
+      dragItem.current = position;
+      setStations(copyListItems);
+    }
+  };
+  const drop = (e) => {
+    dragItem.current = null;
+    dragOverItem.current = null;
+    e.target.classList.remove('opacity-50');
+  };
+
+  return (
+    <div className="min-h-screen bg-[#050505] text-white font-sans flex flex-col selection:bg-white/20">
+      <style dangerouslySetInnerHTML={{ __html: customStyles }} />
+      
+      <header className="flex items-center justify-between px-8 py-6 z-10">
+        <div>
+          <h1 className="text-2xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-white to-white/50">
+            COMPRESSOR CORE
+          </h1>
+          <p className="text-[10px] text-white/30 font-bold tracking-[0.2em] uppercase mt-1">Lifetime Testing System V3.2</p>
+        </div>
+        <div className="flex gap-4">
+          <button className="p-3 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 backdrop-blur-md transition-all text-white/70">
+            <Settings className="w-5 h-5" />
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 px-8 pb-8 overflow-auto z-10">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
+          {stations.map((station, index) => (
+            <StationCard 
+              key={station.id} // key保持不变，保证动画和状态绑定正确
+              index={index}
+              station={station} 
+              onRemove={removeStation} 
+              onLog={addLog}
+              dragStart={dragStart}
+              dragEnter={dragEnter}
+              drop={drop}
+            />
+          ))}
+          
+          <button onClick={addStation} className="group relative flex flex-col items-center justify-center min-h-[460px] rounded-[32px] border border-white/10 bg-white/[0.02] hover:bg-white/[0.05] transition-all cursor-pointer">
+            <div className="w-16 h-16 rounded-full bg-white/5 group-hover:bg-white/10 group-hover:scale-110 flex items-center justify-center transition-all duration-300">
+              <Plus className="w-6 h-6 text-white/50 group-hover:text-white" />
+            </div>
+            <span className="mt-4 text-xs font-bold tracking-widest text-white/30 group-hover:text-white/70 uppercase transition-colors">Add Station</span>
+          </button>
+        </div>
+      </main>
+
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[600px] h-12 flex items-center px-4 bg-black/60 border border-white/10 rounded-full backdrop-blur-2xl z-50 overflow-hidden shadow-2xl pointer-events-none">
+        <Terminal className="w-4 h-4 text-white/40 mr-3 shrink-0" />
+        <div className="flex-1 font-mono text-[11px] text-white/70 truncate">
+          {logs[logs.length - 1]}
+        </div>
+        <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0 ml-3"></div>
+      </div>
+    </div>
+  );
+}

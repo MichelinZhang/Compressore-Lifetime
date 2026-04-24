@@ -1,0 +1,23 @@
+{
+    "device_name": "Dev1",
+    "ai": {
+        "ai0": {
+            "name": "Sys_Pressure",
+            "unit": "Bar",
+            "min_v": 0.0,
+            "max_v": 10.0,
+            "scale_slope": 2.5,
+            "scale_intercept": -1.0
+        }
+    },
+    "do": {
+        "port0/line0": {"name": "Valve_V1", "default": false},
+        "port0/line1": {"name": "Valve_V2", "default": false},
+        "port0/line2": {"name": "Valve_V3", "default": false},
+        "port0/line3": {"name": "Compressor", "default": false},
+        "port0/line4": {"name": "P_Sensor_Power", "default": true},
+        "port0/line5": {"name": "Counter_Power", "default": true},
+        "port0/line6": {"name": "Counter_Signal", "default": false},
+        "port0/line7": {"name": "Alarm_Buzzer", "default": false}
+    }
+}
