@@ -1,1 +1,0 @@
-[{"type": "MOVE_A", "pos": 30.0, "speed": 5.0, "force": 100.0, "push": 0.0}, {"type": "DELAY", "time": 0.0}, {"type": "MOVE_A", "pos": 0.0, "speed": 5.0, "force": 100.0, "push": 0.0}, {"type": "MOVE_B", "pos": 30.0, "speed": 5.0, "force": 100.0, "push": 10.0}, {"type": "DELAY", "time": 6.0}, {"type": "MOVE_B", "pos": 0.0, "speed": 5.0, "force": 100.0, "push": 0.0}]
