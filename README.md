@@ -143,6 +143,4 @@ dist\CompressorLifetime\CompressorLifetime.dist\CompressorLifetime.exe
 
 ## 版权
 
-Copyright (C) 2026 Fresenius Medical Care. All Rights Reserved.
-
 作者：Zhang zhelei / Michelin
