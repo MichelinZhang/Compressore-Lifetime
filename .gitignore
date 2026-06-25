@@ -1,0 +1,46 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Nuitka / PyInstaller 构建产物
+dist/
+build/
+*.build/
+*.dist/
+nuitka-crash-report.xml
+*.spec.bak
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+
+# 系统与临时文件
+Thumbs.db
+Desktop.ini
+*.lnk
+*.log
+*.tmp
+
+# 测试日志与本地数据（运行时生成）
+data record/
+*.csv
+
+# Node.js（compressor_lifetime_4 前端）
+node_modules/
+.npm/
+*.tsbuildinfo
+
+# 打包中间目录（历史版本遗留）
+3.0/compressor_lifetime_3.dist/
+3.2_6/dist_nuitka/
