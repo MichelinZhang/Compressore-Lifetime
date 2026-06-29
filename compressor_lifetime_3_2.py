@@ -62,8 +62,8 @@ DEFAULT_RECIPE_TEMPLATE = [
             "timeout": 90.0,
             "do_action": [False, False, False, True,  True, True, False, False],
             "release_seq": [
-                {"name": "大泄压 (V2+V3)", "time": 20.0, "do": [False, True, True, False, True, True, False, False]},
-                {"name": "小泄压 (V1)", "time": 37.0, "do": [True, False, False, False, True, True, False, False]}
+                {"name": "大泄压", "time": 20.0, "do": [False, True, True, False, True, True, False, False]},
+                {"name": "小泄压 ", "time": 37.0, "do": [True, False, False, False, True, True, False, False]}
             ]
         }
     },

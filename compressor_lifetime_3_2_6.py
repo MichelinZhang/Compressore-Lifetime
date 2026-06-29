@@ -15,7 +15,7 @@
 
     --- IO 位序 (port line 0~7, 每组 8 路 DO) ---
     0:V1  1:V2  2:V3  3:蜂鸣器  4:压力计供电  5:计数供电  6:计数信号  7:压缩机
-    True=DO高电平。默认 write_do 时 V1 跟随 V3；复杂脉冲(第10次)例外，V1/V2恒低。
+    True=DO高电平。默认 write_do 时 V1 跟随 V2；复杂脉冲(第10次)例外，V1/V2恒低。
 
     --- 测试流程 (单次 Cycle) ---
     Phase1 x4轮: 每轮 90s 打压/泄压循环 + 57s 泄压(V2+V3 20s, 静置37s)
@@ -26,7 +26,7 @@
 
     [Rev 3.2.6 修改内容]:
     1. P1 打压段 V1 保持低电平，仅压缩机升压。
-    2. 默认 V1=V3 联动(sync_v1_to_v3)；复杂脉冲使用 link_v1_to_v3=False。
+    2. 默认 V1=V2 联动(sync_v1_to_v2)；复杂脉冲使用 link_v1_to_v3=False。
     3. write_do 去重 + force 边沿写入；硬件写入成功后才更新 last_do_states。
     4. 复杂脉冲 V3 边沿写 DO，降低 DAQ/USB 负载；脉冲等待段读压 10Hz。
     5. 脉冲失败向上返回，P2 可正确中止。
@@ -128,10 +128,10 @@ def build_ai_chan(dev_name, group_cfg):
     return f"{dev_name}/ai{group_cfg['ai_channel']}"
 
 
-def sync_v1_to_v3(states):
-    """V1(line0) 与 V3(line2) 联动，以 V3 电平为准。"""
+def sync_v1_to_v2(states):
+    """V1(line0) 与 V2(line2) 联动，以 V2 电平为准。"""
     states = list(states)
-    states[DO_V1] = states[DO_V3]
+    states[DO_V1] = states[DO_V2]
     return states
 
 SIMULATION_MODE = False  
@@ -367,7 +367,7 @@ class TestWorker(QThread):
                 
                 if not self.sim_mode and self.do_task:
                     try:
-                        self.do_task.write(sync_v1_to_v3(temp_safe_states))
+                        self.do_task.write(sync_v1_to_v2(temp_safe_states))
                     except Exception as e:
                         self.sig_log.emit(f"暂停态输出失败: {e}")
                 
@@ -487,7 +487,7 @@ class TestWorker(QThread):
             return
         states = list(states)
         if link_v1_to_v3:
-            states = sync_v1_to_v3(states)
+            states = sync_v1_to_v2(states)
         if self.sim_mode:
             self.last_do_states = states
             return self._simulate_response(states)
@@ -730,7 +730,7 @@ class TestWorker(QThread):
             if elapsed - last_read_t >= 0.1:
                 self.read_pressure(silent=True)
                 last_read_t = elapsed
-            time.sleep(0.02)
+            time.sleep(0.002)
         return True
 
     def _run_simple_pulse(self):
@@ -1008,23 +1008,15 @@ class ManualControlDialog(QDialog):
                 QMessageBox.warning(self, "错误", f"硬件写入失败: {e}")
 
     def toggle_line(self, idx):
+        """调试模式：8 路 DO 独立控制，不应用 V1/V2 联动（自动测试仍走 write_do）。"""
         is_on = self.buttons[idx].isChecked()
         self.current_states[idx] = is_on
-        if idx == DO_V3:
-            pass
-        elif idx == DO_V1:
-            self.current_states[DO_V3] = is_on
-        self.current_states = sync_v1_to_v3(self.current_states)
-        if idx in (DO_V1, DO_V3):
-            for v_idx in (DO_V1, DO_V3):
-                on = self.current_states[v_idx]
-                self.buttons[v_idx].setChecked(on)
-                self.update_btn_style(v_idx, on)
-        else:
-            self.update_btn_style(idx, is_on)
+        self.update_btn_style(idx, is_on)
         if not SIMULATION_MODE and self.do_task:
-            try: self.do_task.write(self.current_states)
-            except: pass
+            try:
+                self.do_task.write(self.current_states)
+            except Exception:
+                pass
             
     def update_btn_style(self, idx, is_on):
         btn = self.buttons[idx]
@@ -1452,7 +1444,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Compressor Lifetime Rev 3.2.6")
+        self.setWindowTitle("Compressor Lifetime Rev 1.0")
         self.resize(1440, 960)
         self.stations = []
         self._entry_anims = []
