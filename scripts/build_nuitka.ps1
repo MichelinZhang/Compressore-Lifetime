@@ -1,4 +1,4 @@
-# Compressor Lifetime Rev 3.2.6 - Nuitka one-click build (Windows)
+# Compressor Lifetime Rev 3.2.7 - Nuitka one-click build (Windows)
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\build_nuitka.ps1
@@ -8,6 +8,10 @@
 #   1. Python 3.10+ venv at .venv with: pip install -r requirements-ni.txt
 #   2. MSVC Build Tools OR auto-download MinGW64 (first build may take 15-30 min)
 #   3. Target PC must install NI-DAQmx Runtime (not bundled in exe)
+#
+# Bundled modules:
+#   - compressor_lifetime_3_2_6.py (entry)
+#   - daq_device_manager.py (shared AI / multi-station DO pool)
 #
 # Output:
 #   dist\CompressorLifetime\CompressorLifetime.dist\CompressorLifetime.exe
@@ -23,8 +27,9 @@ Set-Location $Root
 
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $Entry = "compressor_lifetime_3_2_6.py"
+$DaqModule = "daq_device_manager.py"
 $OutDir = Join-Path $Root "dist\CompressorLifetime"
-$ProductVersion = "3.2.6"
+$ProductVersion = "3.2.7"
 
 if (-not (Test-Path $VenvPython)) {
     Write-Error @"
@@ -38,6 +43,10 @@ Setup:
 
 if (-not (Test-Path (Join-Path $Root $Entry))) {
     Write-Error "Entry script not found: $Entry"
+}
+
+if (-not (Test-Path (Join-Path $Root $DaqModule))) {
+    Write-Error "Required module not found: $DaqModule (multi-station DAQ pool)"
 }
 
 & $VenvPython -m nuitka --version | Out-Null
@@ -56,7 +65,9 @@ Write-Host "=========================================="
 Write-Host " Compressor Lifetime Nuitka Build $ProductVersion"
 Write-Host "=========================================="
 Write-Host "  Entry   : $Entry"
+Write-Host "  Modules : $DaqModule"
 Write-Host "  Output  : $OutDir"
+Write-Host "  Features: 6-station shared AI (Dev1 ai0:5)"
 Write-Host ""
 
 $CompilerArgs = @()
@@ -73,6 +84,7 @@ $BuildStart = Get-Date
     --standalone `
     --assume-yes-for-downloads `
     --enable-plugin=pyqt6 `
+    --include-module=daq_device_manager `
     --include-package=nidaqmx `
     --nofollow-import-to=scipy,matplotlib,PIL `
     --output-dir="$OutDir" `
@@ -82,6 +94,7 @@ $BuildStart = Get-Date
     --product-name="Compressor Lifetime Test" `
     --file-version="$ProductVersion.0" `
     --product-version="$ProductVersion" `
+    --file-description="Compressor Lifetime Test Rev $ProductVersion" `
     --jobs=1 `
     --show-progress `
     @CompilerArgs `
@@ -104,6 +117,7 @@ if ($ExeCandidates) {
     Write-Host ""
     Write-Host "Deploy notes:"
     Write-Host "  - Install NI-DAQmx Runtime on target machine"
+    Write-Host "  - USB-6363 recommended for 6 parallel stations (Group1~6)"
     Write-Host "  - Run CompressorLifetime.exe from the .dist folder"
 } else {
     Write-Warning "Build finished but CompressorLifetime.exe not found under $OutDir"

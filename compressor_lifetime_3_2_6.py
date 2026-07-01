@@ -26,10 +26,16 @@
 
     [Rev 3.2.6 修改内容]:
     1. P1 打压段 V1 保持低电平，仅压缩机升压。
-    2. 默认 V1=V2 联动(sync_v1_to_v2)；复杂脉冲使用 link_v1_to_v3=False。
+    2. 默认 V1=V2 联动(sync_v1_to_v2)；复杂脉冲使用 link_v1_to_v2=False。
     3. write_do 去重 + force 边沿写入；硬件写入成功后才更新 last_do_states。
     4. 复杂脉冲 V3 边沿写 DO，降低 DAQ/USB 负载；脉冲等待段读压 10Hz。
     5. 脉冲失败向上返回，P2 可正确中止。
+    6. 同一 Dev1 多工位共享 ai0:5 连续采样 (DaqDeviceManager)，支持 6 组同时测试。
+
+    [Rev 3.2.7 / PR2]:
+    1. 连接/启动前 Group 冲突检测（同 Dev1 不可重复 Group）。
+    2. 硬件初始化失败时不误触发急停；cleanup 释放逻辑更稳健。
+    3. write_do 参数 link_v1_to_v2；调试模式与 README 同步更新。
 
     [Rev 1.0 基础能力]:
     1. 6 组固定接线 Group1~6 -> port/line/ai 映射 (GROUP_MAP)
@@ -66,6 +72,8 @@ pg.setConfigOptions(antialias=True)
 # --- 3. 硬件驱动导入 (NI-DAQmx) ---
 import nidaqmx
 from nidaqmx.constants import LineGrouping, TerminalConfiguration, AcquisitionType
+
+from daq_device_manager import DaqDeviceManager
 
 
 # ============================================================================
@@ -129,7 +137,7 @@ def build_ai_chan(dev_name, group_cfg):
 
 
 def sync_v1_to_v2(states):
-    """V1(line0) 与 V2(line2) 联动，以 V2 电平为准。"""
+    """V1(line0) 与 V2(line1) 联动，以 V2 电平为准。"""
     states = list(states)
     states[DO_V1] = states[DO_V2]
     return states
@@ -254,16 +262,17 @@ class TestWorker(QThread):
     sig_timer = pyqtSignal(str)
     sig_button_update = pyqtSignal(str)
 
-    def __init__(self, config, group_cfg, log_dir):
+    def __init__(self, config, group_cfg, log_dir, daq_manager=None):
         super().__init__()
         self.config = config
         self.group_cfg = dict(group_cfg)
         self.group_label = format_group_cfg(self.group_cfg)
         self.log_dir = log_dir
+        self.daq_manager = daq_manager
+        self._lease_token = None
         self.is_running = True
         self.is_paused = False
         self.do_task = None
-        self.ai_task = None
         self.csv_file = None
         try:
             self.dev_name = str(config['device']).strip()
@@ -296,6 +305,7 @@ class TestWorker(QThread):
         self.fault_triggered = False
         self.last_do_states = [False] * 8
         self._in_pause_handler = False
+        self._hardware_acquired = False
 
     def run(self):
         try:
@@ -345,7 +355,8 @@ class TestWorker(QThread):
 
         except Exception as e:
             self.sig_error.emit(f"系统异常: {str(e)}")
-            self.emergency_shutdown() 
+            if self._hardware_acquired:
+                self.emergency_shutdown()
         finally:
             self.cleanup()
             self.sig_finished.emit()
@@ -408,69 +419,36 @@ class TestWorker(QThread):
         self.emergency_shutdown()
 
     def setup_hardware(self):
-        if self.sim_mode: return
-        lines = build_do_lines(self.dev_name, self.group_cfg)
-        self.do_task = nidaqmx.Task()
+        if self.sim_mode:
+            return
+        if self.daq_manager is None:
+            raise RuntimeError("DaqDeviceManager 未配置")
+        self._lease_token = f"worker-st{self.station_idx}-{id(self)}"
+        group_id = self.group_cfg["group_id"]
+        ai_channel = self.group_cfg["ai_channel"]
         try:
-            self.do_task.do_channels.add_do_chan(lines, line_grouping=LineGrouping.CHAN_PER_LINE)
-            self.do_task.start()
-            self.do_task.write([False]*8)
+            self.do_task = self.daq_manager.acquire_do(self.group_cfg, self._lease_token)
+            self.daq_manager.acquire_ai(ai_channel, self._lease_token)
+            self._hardware_acquired = True
         except Exception as e:
-            self.do_task.close()
-            raise RuntimeError(f"DO初始化失败: {e}")
-        
-        ai_chan = build_ai_chan(self.dev_name, self.group_cfg)
-        self.ai_task = nidaqmx.Task()
-        try:
-            self.ai_task.ai_channels.add_ai_voltage_chan(
-                ai_chan, terminal_config=TerminalConfiguration.RSE, min_val=-10.0, max_val=10.0
-            )
-            self.ai_task.timing.cfg_samp_clk_timing(
-                rate=500, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=1000
-            )
-            self.ai_task.start()
-        except Exception as e:
-            self.ai_task.close()
-            self.do_task.close()
-            raise RuntimeError(f"AI初始化失败: {e}")
+            if self.daq_manager and self._lease_token:
+                self.daq_manager.release_do(group_id, self._lease_token)
+                self.daq_manager.release_ai(self._lease_token)
+            self.do_task = None
+            self._lease_token = None
+            raise RuntimeError(str(e)) from e
 
     def read_pressure(self, silent=False):
         if self.sim_mode: 
             return self._simulate_pressure(silent)
     
         try:
-        # 1. 硬件层：读取所有可用数据（一次可能拿到 10-50 个点）
-            data = self.ai_task.read(number_of_samples_per_channel=nidaqmx.constants.READ_ALL_AVAILABLE)
-        
-            if len(data) == 0:
+            if self.daq_manager is None:
                 return self._last_pressure
-
-        # 2. 【核心修改】抗脉冲干扰处理
-        # 针对你的图表：因为只有尖峰，只要取“中位数”，尖峰就会被 100% 完美丢弃
-            if len(data) >= 3:
-            # 使用中位数，它比平均值更能抗尖峰
-                current_volts = statistics.median(data)
-            else:
-                current_volts = data[0]
-
-        # 3. 物理量转换
-            current_p = max(0, (current_volts - 1.0) * 2.5)
-
-        # 4. 软件层：滑动平均 (平滑趋势)
-        # 将干净的数据放入队列
-            self.pressure_deque.append(current_p)
-        
-        # 计算最终值
-            filtered_p = sum(self.pressure_deque) / len(self.pressure_deque)
-        # 死区截断 (Zero Cutoff) 零点漂移
-            if filtered_p < 0.015:
-                filtered_p = 0.0
-
+            filtered_p = self.daq_manager.read_pressure(self.group_cfg["ai_channel"])
             self._last_pressure = filtered_p
-            
             if not silent: 
                 self.sig_pressure.emit(filtered_p)
-                
             self._update_stats(filtered_p)
             self._check_safety(filtered_p)
             return filtered_p
@@ -479,18 +457,18 @@ class TestWorker(QThread):
             if self.is_running: raise e
             return 0.0
 
-    def write_do(self, states, link_v1_to_v3=True, force=False):
+    def write_do(self, states, link_v1_to_v2=True, force=False):
         if not self.is_running: return
         if len(states) != 8:
             self.is_running = False
             self.sig_error.emit(f"写入硬件失败: DO 状态长度应为 8，实际为 {len(states)}")
             return
         states = list(states)
-        if link_v1_to_v3:
+        if link_v1_to_v2:
             states = sync_v1_to_v2(states)
         if self.sim_mode:
             self.last_do_states = states
-            return self._simulate_response(states)
+            return
         if not force and states == self.last_do_states:
             return
         if self.do_task:
@@ -502,13 +480,17 @@ class TestWorker(QThread):
                 self.sig_error.emit(f"写入硬件失败: {e}")
 
     def emergency_shutdown(self):
-        if self.sim_mode: return
-        if self.do_task: 
-            try:
-                self.do_task.stop(); self.do_task.start(); self.do_task.write([False]*8)
-                self.last_do_states = [False] * 8
-            except Exception as e:
-                self.sig_log.emit(f"紧急停机输出失败: {e}")
+        if self.sim_mode:
+            self.last_do_states = [False] * 8
+            return
+        task = self.do_task
+        if not task:
+            return
+        try:
+            task.write([False] * 8)
+            self.last_do_states = [False] * 8
+        except Exception as e:
+            self.sig_log.emit(f"紧急停机输出失败: {e}")
 
     def run_phase_1(self, cycle):
         success_count = 0 
@@ -642,19 +624,41 @@ class TestWorker(QThread):
             self.sig_log.emit(f"结束态输出失败: {e}")
 
     def cleanup(self):
-        if not self.sim_mode and self.do_task:
+        if self.sim_mode:
+            return
+        group_id = self.group_cfg["group_id"]
+        token = self._lease_token
+        task = self.do_task
+        self.do_task = None
+        if token and self.daq_manager:
+            if task:
+                try:
+                    states = [False] * 8
+                    if self.fault_triggered:
+                        states[DO_BUZZER] = True
+                    task.write(states)
+                except Exception as e:
+                    self.sig_log.emit(f"DO 清理写入失败: {e}")
             try:
-                states = [False]*8
-                if self.fault_triggered:
-                    states[DO_BUZZER] = True
-                self.do_task.write(states); self.do_task.close()
+                self.daq_manager.release_do(group_id, token)
             except Exception as e:
-                self.sig_log.emit(f"DO 清理失败: {e}")
-        if not self.sim_mode and self.ai_task:
+                self.sig_log.emit(f"DO 释放失败: {e}")
             try:
-                self.ai_task.close()
+                self.daq_manager.release_ai(token)
             except Exception as e:
-                self.sig_log.emit(f"AI 清理失败: {e}")
+                self.sig_log.emit(f"AI 释放失败: {e}")
+        elif task:
+            try:
+                task.write([False] * 8)
+            except Exception as e:
+                self.sig_log.emit(f"DO 清理写入失败: {e}")
+            try:
+                task.stop()
+                task.close()
+            except Exception as e:
+                self.sig_log.emit(f"DO 关闭失败: {e}")
+        self._lease_token = None
+        self._hardware_acquired = False
 
     def create_log_file(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -680,17 +684,26 @@ class TestWorker(QThread):
             self.sig_log.emit(f"日志写入失败: {e}")
 
     def _simulate_pressure(self, silent):
-        time.sleep(0.02); noise = random.uniform(-0.05, 0.05)
+        time.sleep(0.02)
+        self._simulate_response(self.last_do_states)
+        noise = random.uniform(-0.05, 0.05)
         self._sim_p_val = max(0, self._sim_p_val + noise)
-        if not silent: self.sig_pressure.emit(self._sim_p_val)
-        self._update_stats(self._sim_p_val); self._check_safety(self._sim_p_val)
+        if not silent:
+            self.sig_pressure.emit(self._sim_p_val)
+        self._update_stats(self._sim_p_val)
+        self._check_safety(self._sim_p_val)
         return self._sim_p_val
 
     def _simulate_response(self, states):
+        """按当前 DO 叠加升/泄压；V2/V3 与压缩机可同时作用（匹配 P1 泄压段 IO）。"""
+        delta = 0.0
         if states[DO_COMPRESSOR]:
-            self._sim_p_val += 0.15
-        elif states[DO_V2] or states[DO_V3]:
-            self._sim_p_val = max(0, self._sim_p_val - 0.3)
+            delta += 0.15
+        if states[DO_V2] or states[DO_V3]:
+            delta -= 0.3
+        elif not states[DO_COMPRESSOR]:
+            delta -= 0.05
+        self._sim_p_val = max(0, self._sim_p_val + delta)
 
     def _update_stats(self, val):
         if val > self.step_max_p: self.step_max_p = val
@@ -793,7 +806,7 @@ class TestWorker(QThread):
             v3_on = (int(elapsed / COMPLEX_V3_PERIOD_S) % 2) == 0
             if last_v3_on is None or v3_on != last_v3_on:
                 last_v3_on = v3_on
-                self.write_do(build_states(v3_on), link_v1_to_v3=False, force=True)
+                self.write_do(build_states(v3_on), link_v1_to_v2=False, force=True)
 
             phase = int(elapsed / COMPLEX_V3_PERIOD_S)
             if phase != last_read_phase:
@@ -808,7 +821,7 @@ class TestWorker(QThread):
 # ============================================================================
 
 class ManualControlDialog(QDialog):
-    def __init__(self, dev_name, group_cfg, station_widget, parent=None):
+    def __init__(self, dev_name, group_cfg, station_widget, daq_manager=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"调试模式 (Debug) - {dev_name}")
         self.setFixedSize(460, 640) # 稍微加高一点以容纳更多信息
@@ -816,13 +829,12 @@ class ManualControlDialog(QDialog):
         self.group_cfg = dict(group_cfg)
         self.group_label = format_group_cfg(self.group_cfg)
         self.station = station_widget
+        self.daq_manager = daq_manager
+        self._lease_token = f"debug-st{station_widget.idx}-{id(self)}"
         self.do_task = None
-        self.ai_task = None 
         self.current_states = [False] * 8; self.buttons = []
         self._sim_p = 0.0 
-        
-        # [新增] 调试用的滑动窗口，与 TestWorker 保持完全一致的逻辑
-        self.debug_deque = deque(maxlen=4) 
+        self.timer = QTimer(self)
         
         self.init_ui()
         self.start_tasks() 
@@ -904,93 +916,45 @@ class ManualControlDialog(QDialog):
 
 
     def start_tasks(self):
-        # ... (DO Task 部分保持不变) ...
         if not SIMULATION_MODE:
+            if self.daq_manager is None:
+                QMessageBox.critical(self, "硬件错误", "DaqDeviceManager 未配置，无法打开调试模式。")
+                return
             try:
-                self.do_task = nidaqmx.Task()
-                lines = build_do_lines(self.dev_name, self.group_cfg)
-                self.do_task.do_channels.add_do_chan(lines, line_grouping=nidaqmx.constants.LineGrouping.CHAN_PER_LINE)
-                self.do_task.start()
-                self.do_task.write([False]*8)
+                self.do_task = self.daq_manager.acquire_do(self.group_cfg, self._lease_token)
+                self.daq_manager.acquire_ai(self.group_cfg["ai_channel"], self._lease_token)
             except Exception as e:
-                QMessageBox.critical(self, "硬件错误 (DO)", f"无法占用DO通道:\n{e}")
+                QMessageBox.critical(self, "硬件错误", f"无法占用 DO/AI 通道:\n{e}")
+                self.do_task = None
+                return
 
-            # [修改] AI Task 配置：增加缓冲，确保能读到多个点用于中值滤波
-            try:
-                self.ai_task = nidaqmx.Task()
-                ai_chan = build_ai_chan(self.dev_name, self.group_cfg)
-                self.ai_task.ai_channels.add_ai_voltage_chan(
-                    ai_chan, terminal_config=TerminalConfiguration.RSE, min_val=-10.0, max_val=10.0
-                )
-                # 配置采样时钟，确保有足够的点数
-                self.ai_task.timing.cfg_samp_clk_timing(
-                    rate=500, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=1000
-                )
-                self.ai_task.start()
-            except Exception as e:
-                print(f"Warning: AI Task init failed in debug: {e}")
-                self.ai_task = None
-
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_pressure)
-        self.timer.start(100) # 10Hz 刷新率
+        if not self.timer.isActive():
+            self.timer.timeout.connect(self.update_pressure)
+            self.timer.start(100) # 10Hz 刷新率
 
     def update_pressure(self):
-        """[核心修改] 同时显示原始值和经过中值+滑动平均处理后的值"""
+        """显示共享 AI 池中的滤波值与原始值"""
         raw_val = 0.0
         filtered_val = 0.0
         
         if SIMULATION_MODE:
-            # 仿真逻辑 (保持简单震荡)
+            delta = 0.0
             if self.current_states[DO_COMPRESSOR]:
-                self._sim_p += 0.2
-            elif self.current_states[DO_V2] or self.current_states[DO_V3]:
-                self._sim_p -= 0.3
-            else: self._sim_p -= 0.05
-            base_p = max(0, min(3.0, self._sim_p))
-            
-            # 模拟噪声：原始值乱跳，滤波值平滑
+                delta += 0.2
+            if self.current_states[DO_V2] or self.current_states[DO_V3]:
+                delta -= 0.3
+            elif not self.current_states[DO_COMPRESSOR]:
+                delta -= 0.05
+            self._sim_p = max(0, min(3.0, self._sim_p + delta))
+            base_p = self._sim_p
             noise = random.uniform(-0.15, 0.15) 
             raw_val = max(0, base_p + noise)
-            
-            self.debug_deque.append(raw_val) # 简化仿真，直接把带噪声的放进去
-            filtered_val = sum(self.debug_deque) / len(self.debug_deque)
-            
-        elif self.ai_task:
-            try:
-                # 1. 读取缓冲区内所有数据 (10Hz刷新率下，500Hz采样率应该有50个点左右)
-                data = self.ai_task.read(number_of_samples_per_channel=nidaqmx.constants.READ_ALL_AVAILABLE)
-                
-                if len(data) > 0:
-                    # --- A. 计算原始瞬时值 (Raw) ---
-                    # 为了展示效果，我们取最后一个点，或者如果有明显尖峰取最大值
-                    # 这里取最后一个点作为“当前读数”
-                    raw_volts = data[-1]
-                    raw_val = max(0, (raw_volts - 1.0) * 2.5)
-                    
-                    # --- B. 计算算法处理值 (Filtered) ---
-                    # 步骤1: 中值滤波 (去尖峰)
-                    if len(data) >= 3:
-                        median_volts = statistics.median(data)
-                    else:
-                        median_volts = sum(data)/len(data)
-                    
-                    mid_p = max(0, (median_volts - 1.0) * 2.5)
-                    
-                    # 步骤2: 滑动平均 (去抖动)
-                    self.debug_deque.append(mid_p)
-                    filtered_val = sum(self.debug_deque) / len(self.debug_deque)
-                    if filtered_val < 0.05:
-                        filtered_val = 0.0
-                else:
-                    # 没读到数据，保持上次的值
-                    if self.debug_deque: filtered_val = self.debug_deque[-1]
-                    
-            except Exception:
-                raw_val = 0.0
-                filtered_val = 0.0
+            filtered_val = raw_val
+        elif self.daq_manager:
+            ai_ch = self.group_cfg["ai_channel"]
+            filtered_val = self.daq_manager.read_pressure(ai_ch)
+            raw_val = self.daq_manager.read_pressure_raw(ai_ch)
         
-        # 更新 UI
         self.lbl_filtered_p.setText(f"{filtered_val:.2f} Bar")
         self.lbl_raw_p.setText(f"{raw_val:.2f} Bar")
 
@@ -1028,12 +992,22 @@ class ManualControlDialog(QDialog):
 
     def closeEvent(self, event):
         self.timer.stop()
-        if self.do_task:
-            try: self.do_task.write([False]*8); self.do_task.stop(); self.do_task.close()
-            except: pass
-        if self.ai_task:
-            try: self.ai_task.stop(); self.ai_task.close()
-            except: pass
+        if not SIMULATION_MODE and self.daq_manager and self._lease_token:
+            group_id = self.group_cfg["group_id"]
+            try:
+                if self.do_task:
+                    self.do_task.write([False] * 8)
+            except Exception:
+                pass
+            try:
+                self.daq_manager.release_do(group_id, self._lease_token)
+            except Exception:
+                pass
+            try:
+                self.daq_manager.release_ai(self._lease_token)
+            except Exception:
+                pass
+        self.do_task = None
         event.accept()
 
 
@@ -1227,9 +1201,24 @@ class StationWidget(QFrame):
 
     def toggle_connection(self):
         if self.btn_connect.isChecked():
-            dev_name = self.in_dev.text()
+            dev_name = self.in_dev.text().strip()
             group_cfg = self.current_group_cfg()
             group_label = format_group_cfg(group_cfg)
+            group_id = group_cfg["group_id"]
+
+            if self.main_window:
+                conflict = self.main_window.find_station_using_group(
+                    dev_name, group_id, exclude=self
+                )
+                if conflict:
+                    QMessageBox.warning(
+                        self, "Group 冲突",
+                        f"设备 {dev_name} 的 Group {group_id} 已被台架 {conflict.idx} 使用。\n"
+                        f"请为每台架选择不同的 Group（Group1~6）。"
+                    )
+                    self.btn_connect.setChecked(False)
+                    return
+
             if not SIMULATION_MODE:
                 try:
                     with nidaqmx.Task() as t_do:
@@ -1299,6 +1288,17 @@ class StationWidget(QFrame):
             'station_idx': self.idx
         }
 
+    def _running_group_conflict(self, dev_name, group_id):
+        if not self.main_window:
+            return False
+        for st in self.main_window.stations:
+            if st is self:
+                continue
+            if st.worker and st.worker.isRunning():
+                if st.in_dev.text().strip() == dev_name and st.current_group_cfg()["group_id"] == group_id:
+                    return True
+        return False
+
     def start_test(self):
         if not self.hardware_connected and not SIMULATION_MODE:
             QMessageBox.warning(self, "未连接", "请先点击'连接'按钮锁定硬件配置。")
@@ -1310,6 +1310,24 @@ class StationWidget(QFrame):
 
         group_cfg = self.current_group_cfg()
         group_label = format_group_cfg(group_cfg)
+        dev_name = self.in_dev.text().strip()
+        group_id = group_cfg["group_id"]
+
+        if not SIMULATION_MODE:
+            if self._running_group_conflict(dev_name, group_id):
+                QMessageBox.warning(
+                    self, "Group 冲突",
+                    f"设备 {dev_name} 的 Group {group_id} 已有其他台架在运行测试。"
+                )
+                return
+            mgr = self.main_window.get_daq_manager(dev_name)
+            busy_msg = mgr.get_group_busy_message(group_id)
+            if busy_msg:
+                QMessageBox.warning(self, "Group 占用", busy_msg)
+                return
+        else:
+            mgr = None
+
         try:
             cfg = self._build_worker_config()
         except ValueError as e:
@@ -1329,7 +1347,7 @@ class StationWidget(QFrame):
         
         try:
             log_dir = self.main_window.log_dir if (self.main_window and hasattr(self.main_window, "log_dir")) else os.getcwd()
-            self.worker = TestWorker(cfg, group_cfg, log_dir)
+            self.worker = TestWorker(cfg, group_cfg, log_dir, daq_manager=mgr)
         except ValueError as e:
             QMessageBox.critical(self, "启动失败", str(e))
             return
@@ -1378,7 +1396,19 @@ class StationWidget(QFrame):
             self.set_glow_state("error") 
 
     def open_manual(self):
-        ManualControlDialog(self.in_dev.text(), self.current_group_cfg(), self, self).exec()
+        if self.worker and self.worker.isRunning():
+            QMessageBox.warning(self, "无法调试", "请先暂停或停止当前测试后再打开调试模式。")
+            return
+        dev_name = self.in_dev.text().strip()
+        group_cfg = self.current_group_cfg()
+        mgr = None
+        if not SIMULATION_MODE and self.main_window:
+            mgr = self.main_window.get_daq_manager(dev_name)
+            busy_msg = mgr.get_group_busy_message(group_cfg["group_id"])
+            if busy_msg:
+                QMessageBox.warning(self, "无法调试", busy_msg)
+                return
+        ManualControlDialog(dev_name, group_cfg, self, daq_manager=mgr, parent=self).exec()
 
     def stop_test(self):
         if self.worker: self.worker.stop()
@@ -1419,6 +1449,8 @@ class StationWidget(QFrame):
     def on_error(self, err_msg):
         self.set_glow_state("error")
         self.global_log.emit(f"[Station {self.idx} 故障] [{self.current_group_label()}] {err_msg}")
+        if "系统异常" in err_msg or "故障:" in err_msg:
+            QMessageBox.critical(self, f"台架 {self.idx} 故障", err_msg)
 
     def on_finish(self):
         self.btn_start.setText("开始测试")
@@ -1453,6 +1485,7 @@ class MainWindow(QMainWindow):
         self.settings_store = QSettings("FMC", "CompressorLifetime")
         saved_dir = str(self.settings_store.value("log_dir", os.getcwd()))
         self.log_dir = saved_dir if os.path.isdir(saved_dir) else os.getcwd()
+        self._daq_managers: dict[str, DaqDeviceManager] = {}
         
         # 主布局
         main_w = QWidget(); main_w.setObjectName("CentralWidget")
@@ -1534,6 +1567,38 @@ class MainWindow(QMainWindow):
         set_keep_awake(True)
         self.add_station()
         self.append_log("提示: 当前版本使用新版6组固定接线与新IO位序。")
+        self.append_log("提示: 同一 Dev1 上多工位共享 AI 采样 (DaqDeviceManager)，需 USB-6363 以支持 6 组 DO。")
+
+    def find_station_using_group(self, dev_name, group_id, exclude=None):
+        dev_name = dev_name.strip()
+        group_id = int(group_id)
+        for st in self.stations:
+            if st is exclude:
+                continue
+            if st.in_dev.text().strip() != dev_name:
+                continue
+            if st.current_group_cfg()["group_id"] != group_id:
+                continue
+            running = st.worker and st.worker.isRunning()
+            if st.hardware_connected or running:
+                return st
+        return None
+
+    def get_daq_manager(self, dev_name: str) -> DaqDeviceManager:
+        dev_name = dev_name.strip()
+        if not dev_name:
+            raise ValueError("设备名称不能为空")
+        if dev_name not in self._daq_managers:
+            self._daq_managers[dev_name] = DaqDeviceManager(dev_name)
+        return self._daq_managers[dev_name]
+
+    def shutdown_daq_managers(self):
+        for mgr in self._daq_managers.values():
+            try:
+                mgr.shutdown()
+            except Exception:
+                pass
+        self._daq_managers.clear()
 
     def add_station(self):
         if len(self.stations) >= MAX_STATIONS:
@@ -1655,6 +1720,7 @@ class MainWindow(QMainWindow):
         for s in self.stations:
             if s.worker and s.worker.isRunning():
                 s.worker.wait(3000)
+        self.shutdown_daq_managers()
         event.accept()
 
 

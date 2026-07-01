@@ -1,6 +1,6 @@
 # Compressor Lifetime Test System
 
-压缩机寿命耐久测试系统 **Rev 3.2.6** — 基于 NI USB-6362/6363 DAQ 与 PyQt6 的多工位自动化测试平台。
+压缩机寿命耐久测试系统 **Rev 3.2.7** — 基于 NI USB-6362/6363 DAQ 与 PyQt6 的多工位自动化测试平台。
 
 ---
 
@@ -11,7 +11,7 @@
 | 操作系统 | Windows 10/11 64-bit |
 | Python | 3.10+（源码运行 / 打包） |
 | 硬件驱动 | [NI-DAQmx Runtime](https://www.ni.com/en-us/support/downloads/drivers/download.ni-daqmx.html) |
-| 采集卡 | NI USB-6362 / 6363 |
+| 采集卡 | **USB-6363**（6 工位并行）；6362 仅支持 2 组（Group1~2） |
 
 ---
 
@@ -44,21 +44,33 @@ python -m venv .venv
 
 Group 与端口映射见程序内 `GROUP_MAP`（port0 line0:7 / 8:15 / …，port1 line0:7 / 8:15）。
 
-**联动规则（Rev 3.2.6）：**
+**联动规则（Rev 3.2.7）：**
 
-- 除复杂脉冲外，**V1 跟随 V3** 电平。
+- 自动测试：除复杂脉冲外，**V1 跟随 V2** 电平。
 - **复杂脉冲（每轮第 10 次）**：V1/V2 恒低，仅 V3 以 100ms 方波切换；压缩机仍为 1s ON / 1s OFF。
+- **调试模式**：8 路 DO 独立控制，无 V1/V2 联动。
 
-### 2. 界面操作
+### 2. 多工位并行（DaqDeviceManager）
+
+同一 **Dev1** 上可同时运行最多 **6 个台架**，要求：
+
+| 规则 | 说明 |
+|------|------|
+| 每台架不同 Group | 默认台架 1→Group1 … 台架 6→Group6 |
+| 共享 AI | 整卡 **1 个** ai0:5 连续采样 Task，各工位读各自通道 |
+| 独立 DO | 每组 8 路 DO 独立 Task，互不重叠 |
+| 不可重复 | 连接/启动/调试时若 Group 已被占用会弹窗拒绝 |
+
+### 3. 界面操作
 
 1. **连接**：选择 Group、填写设备名（默认 `Dev1`），点击「连接」锁定硬件。
 2. **参数**：目标循环次数、高压阈值 `target_p`、低压阈值 `floor_p`、保护上限 `max_p`。
-3. **开始测试**：启动后按钮变为「暂停测试」。
+3. **开始测试**：启动后按钮变为「暂停测试」；多工位可同时开始。
 4. **暂停 / 继续**：手动暂停时压缩机关闭，其余阀门保持；恢复后继续剩余步骤。
-5. **停止**：急停，全部 DO 置低。
-6. **调试模式**：单工位手动控制 IO，V1/V3 按钮联动。
+5. **停止**：急停，本 Group DO 置低；其他工位不受影响。
+6. **调试模式**：单工位手动 IO；不可与同工位测试同时；不可占用已被测试占用的 Group。
 
-### 3. 测试流程（单次 Cycle）
+### 4. 测试流程（单次 Cycle）
 
 ```
 Phase 1 × 4 轮
@@ -70,12 +82,12 @@ Phase 2 × 14 轮
 计数器触发 1s → 下一 Cycle
 ```
 
-### 4. 日志
+### 5. 日志
 
 - CSV 日志保存在主界面设置的日志目录，文件名含设备、Group、port/line、AI 通道与时间戳。
 - 字段：Date, Time, Cycle, Phase, Step, End_P, Max_P, Min_P。
 
-### 5. 可调时序常量
+### 6. 可调时序常量
 
 在 `compressor_lifetime_3_2_6.py` 顶部：
 
@@ -121,7 +133,8 @@ dist\CompressorLifetime\CompressorLifetime.dist\CompressorLifetime.exe
 
 | 路径 | 说明 |
 |------|------|
-| `compressor_lifetime_3_2_6.py` | **当前主程序** Rev 3.2.6 |
+| `compressor_lifetime_3_2_6.py` | **当前主程序** Rev 3.2.7 |
+| `daq_device_manager.py` | 多工位 DAQ 资源池（共享 AI + 分组 DO） |
 | `compressor_lifetime_3_*.py` | 历史版本 |
 | `compressor_lifetime_4/` | Web 版架构（FastAPI + React，实验性） |
 | `python_ni_common/` | 通用 NI 模块 |
@@ -134,10 +147,13 @@ dist\CompressorLifetime\CompressorLifetime.dist\CompressorLifetime.exe
 
 | 现象 | 建议 |
 |------|------|
-| 连接失败 | 确认 DAQmx 已安装、设备名正确、Group 未被其他工位占用 |
+| 连接失败 | 确认 DAQmx 已安装、设备名正确、Group 未被其他台架占用 |
+| AI初始化失败 -50103 | 旧版每工位独立 AI Task；现版已共享 ai0:5，请更新到 Rev 3.2.7+ |
+| 第二台架启动失败 | 确认 Group 不重复；查看日志首条「系统异常」而非「DO 清理失败」 |
 | 脉冲中压缩机不动作 | 用示波器看 line7；检查 MOSFET 驱动与供电 |
 | 打包失败 | 查看 `nuitka-crash-report.xml`；安装 VS Build Tools 或重试 MinGW |
 | 压力读数跳变 | 检查 AI 接线与接地；程序已做中值+滑动平均滤波 |
+| 仿真模式达标不泄压 | Rev 3.2.7 已修复；请确认已更新 |
 
 ---
 

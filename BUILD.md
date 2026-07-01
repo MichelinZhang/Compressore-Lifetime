@@ -1,4 +1,4 @@
-# Compressor Lifetime Rev 3.2.6 — 打包说明
+# Compressor Lifetime Rev 3.2.7 — 打包说明
 
 ## 环境准备
 
@@ -30,6 +30,15 @@ powershell -ExecutionPolicy Bypass -File scripts\build_nuitka.ps1
 powershell -ExecutionPolicy Bypass -File scripts\build_nuitka.ps1 -Clean
 ```
 
+## 打包内容
+
+| 文件 | 说明 |
+|------|------|
+| `compressor_lifetime_3_2_6.py` | 主程序入口 |
+| `daq_device_manager.py` | 多工位 DAQ 资源池（共享 ai0:5 + 分组 DO） |
+
+Nuitka 通过 `--include-module=daq_device_manager` 打入 exe 目录，无需单独复制。
+
 ## 输出位置
 
 ```
@@ -39,6 +48,8 @@ dist\CompressorLifetime\CompressorLifetime.dist\
 ```
 
 请将整个 **`CompressorLifetime.dist` 文件夹** 复制到目标工控机，不要只复制单个 exe。
+
+exe 版本信息：**3.2.7**（`file-version` / `product-version`）
 
 ## 首次构建说明
 
@@ -50,10 +61,13 @@ dist\CompressorLifetime\CompressorLifetime.dist\
 
 1. 安装 NI-DAQmx Runtime
 2. 运行 `CompressorLifetime.exe`
-3. 设备名默认 `Dev1`，按台架 Group 连接对应 port/line
+3. 设备名默认 `Dev1`，每台架选择不同 Group（Group1~6）
+4. **USB-6363** 支持 6 工位并行；6362 仅支持 Group1~2
 
 ## 源码直接运行（开发）
 
 ```powershell
 .\.venv\Scripts\python.exe compressor_lifetime_3_2_6.py
 ```
+
+需与 exe 相同目录下存在 `daq_device_manager.py`（已随仓库提供）。
