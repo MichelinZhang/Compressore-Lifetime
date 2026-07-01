@@ -149,6 +149,11 @@ class DaqDeviceManager:
         with self._lock:
             return float(self._pressure_cache.get(ai_channel, 0.0))
 
+    def read_pressure_snapshot(self) -> dict[int, float]:
+        """一次加锁读取全部 AI 通道缓存，供多工位 UI 批量刷新。"""
+        with self._lock:
+            return {ch: float(val) for ch, val in self._pressure_cache.items()}
+
     def read_pressure_raw(self, ai_channel: int) -> float:
         ai_channel = int(ai_channel)
         with self._lock:

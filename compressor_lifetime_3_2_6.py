@@ -37,6 +37,14 @@
     2. 硬件初始化失败时不误触发急停；cleanup 释放逻辑更稳健。
     3. write_do 参数 link_v1_to_v2；调试模式与 README 同步更新。
 
+    [Rev 3.2.8 / PR3]:
+    1. UI 与 Worker 解耦：主窗口统一 10Hz 从 DAQ cache / 仿真状态拉取压力与倒计时。
+    2. Worker 不再向 UI 高频 emit sig_pressure / sig_timer，消除多工位 Qt 信号风暴。
+
+    [Rev 3.2.9 / PR3b]:
+    1. 主窗口单一定时器驱动全部工位标签插值（替代 6 路 50ms QTimer）。
+    2. DAQ 压力批量快照 + 跳过未变化的 UI/曲线重绘，降低主线程无效刷新。
+
     [Rev 1.0 基础能力]:
     1. 6 组固定接线 Group1~6 -> port/line/ai 映射 (GROUP_MAP)
     2. TestWorker(QThread) + PyQt6 多工位 UI，AI 500Hz 中值+滑动平均滤波
@@ -106,7 +114,7 @@ GROUP_MAP = [
     {"group_id": 3, "port": 0, "line_start": 16, "line_end": 23, "ai_channel": 2},
     {"group_id": 4, "port": 0, "line_start": 24, "line_end": 31, "ai_channel": 3},
     {"group_id": 5, "port": 1, "line_start": 0, "line_end": 7, "ai_channel": 4},
-    {"group_id": 6, "port": 1, "line_start": 8, "line_end": 15, "ai_channel": 5},
+    {"group_id": 6, "port": 2, "line_start": 0, "line_end": 7, "ai_channel": 5},
 ]
 
 
@@ -306,6 +314,7 @@ class TestWorker(QThread):
         self.last_do_states = [False] * 8
         self._in_pause_handler = False
         self._hardware_acquired = False
+        self._ui_timer_remaining = None  # None=显示 "--"；float=倒计时秒数（主线程轮询）
 
     def run(self):
         try:
@@ -349,7 +358,7 @@ class TestWorker(QThread):
                 self.finalize_success()
                 self.sig_status.emit("测试完成", STATUS_STYLES["run"])
                 self.sig_log.emit(f"{self.dev_name}: 测试流程已顺利完成") 
-                self.sig_timer.emit("--")
+                self._ui_timer_remaining = None
             else:
                 self.sig_status.emit("已停止", STATUS_STYLES["err"])
 
@@ -447,8 +456,6 @@ class TestWorker(QThread):
                 return self._last_pressure
             filtered_p = self.daq_manager.read_pressure(self.group_cfg["ai_channel"])
             self._last_pressure = filtered_p
-            if not silent: 
-                self.sig_pressure.emit(filtered_p)
             self._update_stats(filtered_p)
             self._check_safety(filtered_p)
             return filtered_p
@@ -517,7 +524,7 @@ class TestWorker(QThread):
                 if remaining <= 0:
                     break
 
-                self.sig_timer.emit(f"{remaining:.1f}")
+                self._ui_timer_remaining = remaining
                 p = self.read_pressure()
                 states = [False]*8
                 states[DO_PRESSURE_POWER] = True
@@ -599,11 +606,11 @@ class TestWorker(QThread):
                 break
 
             if emit_timer:
-                self.sig_timer.emit(f"{remaining:.1f}")
+                self._ui_timer_remaining = remaining
             self.read_pressure(silent=silent)
             time.sleep(interval)
         if emit_timer:
-            self.sig_timer.emit("0.0")
+            self._ui_timer_remaining = 0.0
         return True
 
     def sleep_smart(self, duration, interval=0.1):
@@ -688,8 +695,6 @@ class TestWorker(QThread):
         self._simulate_response(self.last_do_states)
         noise = random.uniform(-0.05, 0.05)
         self._sim_p_val = max(0, self._sim_p_val + noise)
-        if not silent:
-            self.sig_pressure.emit(self._sim_p_val)
         self._update_stats(self._sim_p_val)
         self._check_safety(self._sim_p_val)
         return self._sim_p_val
@@ -1030,14 +1035,14 @@ class StationWidget(QFrame):
         self.main_window = None
         self.hardware_connected = False
         self.data_x = []; self.data_y = []; self.start_time = 0
-        self._ui_label_anim = QTimer(self)
-        self._ui_label_anim.setInterval(50)
-        self._ui_label_anim.timeout.connect(self._tick_value_labels)
         self._target_pressure = 0.0
         self._display_pressure = 0.0
         self._target_timer = None
         self._display_timer = None
         self._last_plot_update = 0.0
+        self._plot_dirty = False
+        self._last_pressure_text = ""
+        self._last_timer_text = ""
         self._button_anims = []
         self.init_ui()
         self.setup_breathing_animation()
@@ -1176,7 +1181,10 @@ class StationWidget(QFrame):
             self._display_pressure = self._target_pressure
         else:
             self._display_pressure += p_diff * 0.22
-        self.lbl_pressure.setText(f"{self._display_pressure:.2f}")
+        p_text = f"{self._display_pressure:.2f}"
+        if p_text != self._last_pressure_text:
+            self._last_pressure_text = p_text
+            self.lbl_pressure.setText(p_text)
 
         if self._target_timer is not None:
             if self._display_timer is None:
@@ -1186,12 +1194,13 @@ class StationWidget(QFrame):
                 self._display_timer = self._target_timer
             else:
                 self._display_timer += t_diff * 0.30
-            self.lbl_timer.setText(f"{max(0.0, self._display_timer):.1f}")
-        elif self.lbl_timer.text() != "--":
+            t_text = f"{max(0.0, self._display_timer):.1f}"
+            if t_text != self._last_timer_text:
+                self._last_timer_text = t_text
+                self.lbl_timer.setText(t_text)
+        elif self._last_timer_text != "--":
+            self._last_timer_text = "--"
             self.lbl_timer.setText("--")
-
-        if not (self.worker and self.worker.isRunning()) and self._target_timer is None:
-            self._ui_label_anim.stop()
 
     def current_group_cfg(self):
         return get_group_cfg(self.combo_group.currentIndex())
@@ -1337,10 +1346,13 @@ class StationWidget(QFrame):
         self.data_x = []; self.data_y = []; self.curve.setData([], [])
         self.start_time = time.time()
         self._last_plot_update = 0.0
+        self._plot_dirty = False
         self._target_pressure = 0.0
         self._display_pressure = 0.0
         self._target_timer = None
         self._display_timer = None
+        self._last_pressure_text = ""
+        self._last_timer_text = ""
         self.lbl_pressure.setText("0.00")
         self.lbl_timer.setText("--")
         self.lbl_progress_val.setText(f"0 / {cfg['cycles']}") 
@@ -1351,8 +1363,6 @@ class StationWidget(QFrame):
         except ValueError as e:
             QMessageBox.critical(self, "启动失败", str(e))
             return
-        self.worker.sig_pressure.connect(self.update_gui_data)
-        self.worker.sig_timer.connect(self.update_timer)
         self.worker.sig_status.connect(self.update_status)
         self.worker.sig_progress.connect(self.update_progress)
         self.worker.sig_log.connect(lambda m, gl=group_label: self.global_log.emit(f"[Station {self.idx}] [{gl}] {m}"))
@@ -1368,8 +1378,6 @@ class StationWidget(QFrame):
         self.btn_delete.setVisible(False)
         
         self.set_glow_state("run")
-        if not self._ui_label_anim.isActive():
-            self._ui_label_anim.start()
         self.worker.start()
 
     def toggle_pause(self):
@@ -1413,32 +1421,46 @@ class StationWidget(QFrame):
     def stop_test(self):
         if self.worker: self.worker.stop()
 
-    def update_gui_data(self, val):
-        self._target_pressure = val
-        if not self._ui_label_anim.isActive():
-            self._ui_label_anim.start()
+    def update_gui_data(self, val, *, flush_plot=True):
         now = time.time()
-        self.data_x.append(now - self.start_time); self.data_y.append(val)
-        if len(self.data_x) > 1000: self.data_x.pop(0); self.data_y.pop(0)
-        if (now - self._last_plot_update) >= 0.1:
-            self.curve.setData(self.data_x, self.data_y)
+        if abs(val - self._target_pressure) >= 0.002:
+            self._target_pressure = val
+            self.data_x.append(now - self.start_time)
+            self.data_y.append(val)
+            if len(self.data_x) > 1000:
+                self.data_x.pop(0)
+                self.data_y.pop(0)
+            self._plot_dirty = True
+        else:
+            self._target_pressure = val
+
+        if flush_plot and self._plot_dirty and (now - self._last_plot_update) >= 0.1:
+            self.curve.setData(self.data_x, self.data_y, skipFiniteCheck=True)
+            self._plot_dirty = False
             self._last_plot_update = now
 
     def update_timer(self, text):
         if text == "--":
+            if self._target_timer is None:
+                return
             self._target_timer = None
             self._display_timer = None
-            self.lbl_timer.setText("--")
+            if self._last_timer_text != "--":
+                self._last_timer_text = "--"
+                self.lbl_timer.setText("--")
             return
         try:
-            self._target_timer = max(0.0, float(text))
+            new_val = max(0.0, float(text))
         except ValueError:
-            self.lbl_timer.setText(text)
+            if text != self._last_timer_text:
+                self._last_timer_text = text
+                self.lbl_timer.setText(text)
             return
+        if self._target_timer is not None and abs(self._target_timer - new_val) < 0.05:
+            return
+        self._target_timer = new_val
         if self._display_timer is None:
-            self._display_timer = self._target_timer
-        if not self._ui_label_anim.isActive():
-            self._ui_label_anim.start()
+            self._display_timer = new_val
 
     def update_status(self, msg, style):
         self.lbl_status.setText(msg); self.lbl_status.setStyleSheet(style)
@@ -1462,6 +1484,7 @@ class StationWidget(QFrame):
         self.lbl_timer.setText("--")
         self._target_timer = None
         self._display_timer = None
+        self._last_timer_text = "--"
         self._target_pressure = self._display_pressure
         txt = self.lbl_status.text()
         self.set_glow_state("error" if "故障" in txt or "急停" in txt else "idle")
@@ -1486,6 +1509,15 @@ class MainWindow(QMainWindow):
         saved_dir = str(self.settings_store.value("log_dir", os.getcwd()))
         self.log_dir = saved_dir if os.path.isdir(saved_dir) else os.getcwd()
         self._daq_managers: dict[str, DaqDeviceManager] = {}
+        self._ui_refresh_phase = 0
+        self._ui_refresh_timer = QTimer(self)
+        self._ui_refresh_timer.setInterval(100)
+        self._ui_refresh_timer.timeout.connect(self._refresh_running_stations_ui)
+        self._ui_refresh_timer.start()
+        self._ui_anim_timer = QTimer(self)
+        self._ui_anim_timer.setInterval(50)
+        self._ui_anim_timer.timeout.connect(self._tick_all_station_labels)
+        self._ui_anim_timer.start()
         
         # 主布局
         main_w = QWidget(); main_w.setObjectName("CentralWidget")
@@ -1591,6 +1623,45 @@ class MainWindow(QMainWindow):
         if dev_name not in self._daq_managers:
             self._daq_managers[dev_name] = DaqDeviceManager(dev_name)
         return self._daq_managers[dev_name]
+
+    def _refresh_running_stations_ui(self):
+        """主线程统一拉取压力/倒计时，避免多 Worker 高频 Qt 信号堆积。"""
+        mgr_snapshots: dict[int, dict[int, float]] = {}
+        plot_phase = self._ui_refresh_phase
+        self._ui_refresh_phase = (plot_phase + 1) % 3
+        for st in self.stations:
+            worker = st.worker
+            if not worker or not worker.isRunning():
+                continue
+
+            rem = worker._ui_timer_remaining
+            if rem is None:
+                st.update_timer("--")
+            else:
+                st.update_timer(f"{max(0.0, rem):.1f}")
+
+            flush_plot = (st.idx % 3) == plot_phase
+            if worker.sim_mode:
+                st.update_gui_data(worker._sim_p_val, flush_plot=flush_plot)
+            elif worker.daq_manager is not None:
+                mgr = worker.daq_manager
+                mgr_key = id(mgr)
+                if mgr_key not in mgr_snapshots:
+                    mgr_snapshots[mgr_key] = mgr.read_pressure_snapshot()
+                ai_ch = worker.group_cfg["ai_channel"]
+                st.update_gui_data(
+                    mgr_snapshots[mgr_key].get(ai_ch, 0.0),
+                    flush_plot=flush_plot,
+                )
+
+    def _tick_all_station_labels(self):
+        """单一定时器驱动全部工位 50ms 标签插值，替代每工位独立 QTimer。"""
+        for st in self.stations:
+            running = st.worker and st.worker.isRunning()
+            if running or st._target_timer is not None:
+                st._tick_value_labels()
+            elif st._display_pressure != st._target_pressure:
+                st._tick_value_labels()
 
     def shutdown_daq_managers(self):
         for mgr in self._daq_managers.values():

@@ -42,7 +42,7 @@ python -m venv .venv
 |------|---|---|---|---|---|---|---|---|
 | 功能 | V1 | V2 | V3 | 蜂鸣器 | 压力计供电 | 计数供电 | 计数信号 | 压缩机 |
 
-Group 与端口映射见程序内 `GROUP_MAP`（port0 line0:7 / 8:15 / …，port1 line0:7 / 8:15）。
+Group 与端口映射见程序内 `GROUP_MAP`（port0 line0:7 / 8:15 / …，port1 line0:7 / port2 line0:7 /）。
 
 **联动规则（Rev 3.2.7）：**
 
